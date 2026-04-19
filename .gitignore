@@ -1,6 +1,5 @@
 # Personal / sensitive
 secrets.json
-voice_sample.wav
 .processed.json
 recorder.log
 

@@ -14,7 +14,6 @@ SECRETS_FILE = BASE_DIR / "secrets.json"
 
 # Speaker identification
 SPEAKER_NAME = "Leon"  # How your segments are labeled in transcripts
-VOICE_SAMPLE = BASE_DIR / "voice_sample.wav"  # Short clip of your voice
 
 
 def load_secret(key: str) -> str | None:

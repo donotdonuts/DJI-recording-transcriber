@@ -3,7 +3,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from config import BASE_DIR, RECORDINGS_DIR, VOICE_SAMPLE, SPEAKER_NAME, SECRETS_FILE, load_secret
+from config import BASE_DIR, RECORDINGS_DIR, SPEAKER_NAME, SECRETS_FILE, load_secret
 
 # Log to both console and file
 logging.basicConfig(
@@ -28,9 +28,10 @@ def on_drive_connected(drive_path: Path):
     if not new_files:
         return
 
-    api_key = load_secret("OPENAI_API_KEY")
-    if not api_key:
-        log.info(f"\n  WARNING: No API key in {SECRETS_FILE.name}. Skipping transcription.")
+    app_id = load_secret("XFYUN_APP_ID")
+    secret_key = load_secret("XFYUN_SECRET_KEY")
+    if not app_id or not secret_key:
+        log.info(f"\n  WARNING: iFlytek credentials not set in {SECRETS_FILE.name}. Skipping transcription.")
         return
 
     success = 0
@@ -38,13 +39,11 @@ def on_drive_connected(drive_path: Path):
 
     for wav_path, file_key in new_files:
         try:
-            # Determine output path for the transcript
             today = datetime.now().strftime("%Y-%m-%d")
             out_dir = RECORDINGS_DIR / today
             out_dir.mkdir(parents=True, exist_ok=True)
             md_path = out_dir / (wav_path.stem + ".md")
 
-            # Transcribe directly from the drive
             transcribe_and_save(wav_path, md_path)
             mark_processed(file_key, wav_path, md_path)
             success += 1
@@ -68,18 +67,15 @@ def on_drive_connected(drive_path: Path):
 def main():
     RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
-    api_key = load_secret("OPENAI_API_KEY")
-    if not api_key or api_key == "paste-your-key-here":
-        log.info(f"WARNING: Set your OpenAI API key in {SECRETS_FILE}")
+    app_id = load_secret("XFYUN_APP_ID")
+    secret_key = load_secret("XFYUN_SECRET_KEY")
+    if not app_id or not secret_key or "paste" in (app_id + secret_key):
+        log.info(f"WARNING: Set XFYUN_APP_ID and XFYUN_SECRET_KEY in {SECRETS_FILE}")
         log.info("Files will not be transcribed.\n")
     else:
-        log.info("OpenAI API key loaded from secrets.json")
+        log.info("iFlytek credentials loaded from secrets.json")
 
-    if VOICE_SAMPLE.exists():
-        log.info(f"Voice sample loaded - your segments will be labeled as \"{SPEAKER_NAME}\"")
-    else:
-        log.info(f"TIP: Record a short voice sample and save it as {VOICE_SAMPLE.name}")
-        log.info("     This lets the transcriber identify which parts are you.\n")
+    log.info(f"Speaker 1 will be labeled as \"{SPEAKER_NAME}\"")
 
     try:
         watch_for_dji(on_connected=on_drive_connected)

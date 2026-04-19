@@ -1,12 +1,12 @@
 # DJI Mic 3 Recorder & Transcriber
 
-Auto-transcribe recordings from your DJI Mic 3 transmitter with speaker diarization.
+Auto-transcribe recordings from your DJI Mic 3 transmitter with speaker diarization. Supports Chinese-English mixed language transcription.
 
 ## How It Works
 
 1. Press the **record button** on your DJI Mic 3 transmitter throughout the day
 2. Plug the transmitter into your PC via USB
-3. The app detects the drive, finds new recordings, and transcribes them using OpenAI's `gpt-4o-transcribe-diarize` model
+3. The app detects the drive, finds new recordings, and transcribes them using iFlytek's speech recognition API
 4. Markdown transcripts with speaker labels and timestamps are saved to `recordings/YYYY-MM-DD/`
 
 ## Setup
@@ -17,21 +17,19 @@ Auto-transcribe recordings from your DJI Mic 3 transmitter with speaker diarizat
 pip install -r requirements.txt
 ```
 
-### 2. Configure your API key
+### 2. Get iFlytek API credentials
 
-Copy the example secrets file and add your OpenAI API key:
+1. Sign up at [xfyun.cn](https://www.xfyun.cn/)
+2. Create an app and enable the 语音转写 (Speech Transcription) service
+3. Copy your `app_id` and `secret_key`
+
+### 3. Configure credentials
 
 ```bash
 cp secrets.example.json secrets.json
 ```
 
-Edit `secrets.json` and paste your key.
-
-### 3. (Optional) Add a voice sample
-
-Record a short clip (5-10 seconds) of yourself speaking on the DJI Mic 3, then save it as `voice_sample.wav` in the project root. This lets the transcriber identify and label your segments by name.
-
-You can change the speaker label in `config.py` → `SPEAKER_NAME`.
+Edit `secrets.json` and paste your credentials.
 
 ### 4. Run
 
@@ -39,7 +37,7 @@ You can change the speaker label in `config.py` → `SPEAKER_NAME`.
 python main.py
 ```
 
-The app will watch for the DJI Mic 3 transmitter. Plug it in and it processes automatically.
+The app watches for the DJI Mic 3 transmitter. Plug it in and it processes automatically.
 
 ## Auto-Start on Windows
 
@@ -64,8 +62,9 @@ recordings/
 
 Each file includes:
 - Date and duration
-- Speaker labels (with your name if voice sample is provided)
-- Timestamped transcript with speaker diarization
+- Speaker labels with timestamps
+- Full transcript with speaker diarization
+- Native Chinese-English mixed language support
 
 ## File Structure
 
@@ -74,14 +73,15 @@ Each file includes:
 | `main.py` | Entry point |
 | `watcher.py` | Detects DJI Mic 3 USB drive |
 | `importer.py` | Finds new files, tracks processed recordings |
-| `transcriber.py` | OpenAI transcription with speaker diarization |
+| `transcriber.py` | iFlytek transcription with speaker diarization |
 | `config.py` | Settings (paths, speaker name, poll interval) |
-| `secrets.json` | Your API key (git-ignored) |
-| `voice_sample.wav` | Your voice sample for speaker ID (git-ignored) |
+| `secrets.json` | Your API credentials (git-ignored) |
 | `.processed.json` | Central record of processed files (git-ignored) |
 
-## Cost
+## Features
 
-Uses OpenAI's `gpt-4o-transcribe-diarize` model at ~$0.006/minute. A 10-minute recording costs about 6 cents.
-
-Large files (>25MB) are automatically split into chunks for processing.
+- **Chinese-English mixed language** — native support, no configuration needed
+- **Speaker diarization** — auto-detects speakers
+- **Long recordings** — supports files up to 5 hours / 500MB
+- **Deduplication** — tracks processed files so nothing gets transcribed twice
+- **Auto-start** — runs silently on Windows boot

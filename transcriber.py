@@ -1,35 +1,47 @@
+import hashlib
+import hmac
 import base64
-import os
-import tempfile
+import json
+import math
+import time
 import wave
 from datetime import datetime
 from pathlib import Path
 
-from openai import OpenAI
+import requests
 
-from config import load_secret, SPEAKER_NAME, VOICE_SAMPLE
+from config import load_secret, SPEAKER_NAME
 
-DIARIZE_MODEL = "gpt-4o-transcribe-diarize"
-MAX_FILE_SIZE = 24 * 1024 * 1024  # 24MB to stay safely under 25MB API limit
-CHUNK_DURATION = 1200  # 20 minutes per chunk — safe for any sample rate / bit depth
+BASE_URL = "https://raasr.xfyun.cn/api"
+SLICE_SIZE = 10 * 1024 * 1024  # 10MB per slice
+POLL_INTERVAL = 5  # seconds between progress checks
 
 
-def _get_client() -> OpenAI:
-    api_key = load_secret("OPENAI_API_KEY")
-    if not api_key:
+def _get_credentials() -> tuple[str, str]:
+    app_id = load_secret("XFYUN_APP_ID")
+    secret_key = load_secret("XFYUN_SECRET_KEY")
+    if not app_id or not secret_key:
         raise RuntimeError(
-            "Set OPENAI_API_KEY in secrets.json for transcription."
+            "Set XFYUN_APP_ID and XFYUN_SECRET_KEY in secrets.json"
         )
-    return OpenAI(api_key=api_key)
+    return app_id, secret_key
+
+
+def _sign(app_id: str, secret_key: str) -> tuple[str, str]:
+    """Generate timestamp and HMAC-SHA1 signature for iFlytek API."""
+    ts = str(int(time.time()))
+    base_string = app_id + ts
+    md5_hash = hashlib.md5(base_string.encode()).hexdigest()
+    signa = base64.b64encode(
+        hmac.new(secret_key.encode(), md5_hash.encode(), hashlib.sha1).digest()
+    ).decode()
+    return ts, signa
 
 
 def _get_wav_duration(wav_path: Path) -> float:
-    """Return duration in seconds."""
     try:
         with wave.open(str(wav_path), "rb") as wf:
-            frames = wf.getnframes()
-            rate = wf.getframerate()
-            return frames / rate if rate else 0
+            return wf.getnframes() / wf.getframerate() if wf.getframerate() else 0
     except Exception:
         return 0
 
@@ -44,113 +56,97 @@ def _format_duration(seconds: float) -> str:
     return f"{s}s"
 
 
-def _format_timestamp(seconds: float) -> str:
-    m, s = divmod(int(seconds), 60)
+def _format_timestamp(ms: int) -> str:
+    """Format milliseconds to readable timestamp."""
+    total_seconds = ms // 1000
+    m, s = divmod(total_seconds, 60)
     h, m = divmod(m, 60)
     if h:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
 
 
-def _to_data_url(path: Path) -> str:
-    """Convert an audio file to a base64 data URL for the API."""
-    with open(path, "rb") as f:
-        return "data:audio/wav;base64," + base64.b64encode(f.read()).decode("utf-8")
-
-
-def _split_wav(wav_path: Path) -> list[tuple[Path, float]]:
-    """Split a large WAV into chunks. Returns list of (chunk_path, time_offset) pairs.
-    If file is small enough, returns the original path with offset 0."""
-    file_size = wav_path.stat().st_size
-    if file_size <= MAX_FILE_SIZE:
-        return [(wav_path, 0.0)]
-
-    chunks = []
-    with wave.open(str(wav_path), "rb") as wf:
-        rate = wf.getframerate()
-        channels = wf.getnchannels()
-        sampwidth = wf.getsampwidth()
-        total_frames = wf.getnframes()
-        frames_per_chunk = rate * CHUNK_DURATION
-
-        chunk_idx = 0
-        frames_read = 0
-        while frames_read < total_frames:
-            n = min(frames_per_chunk, total_frames - frames_read)
-            data = wf.readframes(n)
-            time_offset = frames_read / rate
-
-            tmp = tempfile.NamedTemporaryFile(
-                suffix=f"_chunk{chunk_idx}.wav", delete=False, dir=wav_path.parent
-            )
-            with wave.open(tmp.name, "wb") as out:
-                out.setnchannels(channels)
-                out.setsampwidth(sampwidth)
-                out.setframerate(rate)
-                out.writeframes(data)
-            chunks.append((Path(tmp.name), time_offset))
-
-            frames_read += n
-            chunk_idx += 1
-
-    return chunks
-
-
-def _transcribe_single(client: OpenAI, wav_path: Path, extra: dict) -> list[dict]:
-    """Transcribe a single WAV file (must be under 25MB)."""
-    with open(wav_path, "rb") as f:
-        result = client.audio.transcriptions.create(
-            model=DIARIZE_MODEL,
-            file=f,
-            response_format="diarized_json",
-            chunking_strategy="auto",
-            **({} if not extra else {"extra_body": extra}),
-        )
-
-    segments = []
-    for seg in result.segments:
-        segments.append({
-            "speaker": seg.speaker,
-            "text": seg.text,
-            "start": seg.start,
-            "end": seg.end,
-        })
-    return segments
+def _api_request(endpoint: str, app_id: str, secret_key: str, **extra) -> dict:
+    """Make a signed request to the iFlytek API."""
+    ts, signa = _sign(app_id, secret_key)
+    data = {"app_id": app_id, "signa": signa, "ts": ts, **extra}
+    resp = requests.post(f"{BASE_URL}/{endpoint}", data=data)
+    resp.raise_for_status()
+    result = resp.json()
+    if result.get("ok") != 0:
+        raise RuntimeError(f"iFlytek API error: {result}")
+    return result
 
 
 def transcribe(wav_path: Path) -> list[dict]:
-    """Send a WAV file to OpenAI with diarization. Splits large files into chunks."""
-    client = _get_client()
+    """Upload a WAV file to iFlytek and get diarized transcription."""
+    app_id, secret_key = _get_credentials()
+    file_size = wav_path.stat().st_size
+    file_name = wav_path.name
+    slice_num = math.ceil(file_size / SLICE_SIZE)
 
-    extra = {}
-    if VOICE_SAMPLE.exists():
-        extra["known_speaker_names"] = [SPEAKER_NAME]
-        extra["known_speaker_references"] = [_to_data_url(VOICE_SAMPLE)]
+    # Step 1: Prepare
+    print(f"    Uploading to iFlytek...")
+    result = _api_request(
+        "prepare", app_id, secret_key,
+        file_len=str(file_size),
+        file_name=file_name,
+        slice_num=str(slice_num),
+        has_seperate="true",
+        speaker_number="0",  # 0 = auto-detect number of speakers
+    )
+    task_id = result["data"]
 
-    chunks = _split_wav(wav_path)
-    is_chunked = len(chunks) > 1
+    # Step 2: Upload slices
+    with open(wav_path, "rb") as f:
+        for i in range(slice_num):
+            chunk = f.read(SLICE_SIZE)
+            ts, signa = _sign(app_id, secret_key)
+            data = {
+                "app_id": app_id,
+                "signa": signa,
+                "ts": ts,
+                "task_id": task_id,
+                "slice_id": f"aaa_{i}",
+            }
+            resp = requests.post(
+                f"{BASE_URL}/upload",
+                data=data,
+                files={"content": chunk},
+            )
+            resp.raise_for_status()
 
-    if is_chunked:
-        print(f"    Large file — split into {len(chunks)} chunks")
+    # Step 3: Merge
+    _api_request("merge", app_id, secret_key, task_id=task_id)
 
-    all_segments = []
-    for i, (chunk_path, time_offset) in enumerate(chunks):
-        if is_chunked:
-            print(f"    Transcribing chunk {i + 1}/{len(chunks)}...")
+    # Step 4: Poll for completion
+    print(f"    Processing...")
+    while True:
+        time.sleep(POLL_INTERVAL)
+        result = _api_request("getProgress", app_id, secret_key, task_id=task_id)
+        status = json.loads(result["data"]) if isinstance(result["data"], str) else result["data"]
+        desc = status.get("desc", "")
+        if status.get("status") == 9:
+            print(f"    Transcription complete.")
+            break
+        print(f"    Status: {desc}")
 
-        segments = _transcribe_single(client, chunk_path, extra)
+    # Step 5: Get result
+    result = _api_request("getResult", app_id, secret_key, task_id=task_id)
+    raw_data = result["data"]
+    if isinstance(raw_data, str):
+        raw_data = json.loads(raw_data)
 
-        # Adjust timestamps by the chunk's offset
-        for seg in segments:
-            seg["start"] += time_offset
-            seg["end"] += time_offset
-        all_segments.extend(segments)
-
-        # Clean up temp chunk files
-        if chunk_path != wav_path:
-            chunk_path.unlink()
-
-    return all_segments
+    # Parse into segments
+    segments = []
+    for item in raw_data:
+        segments.append({
+            "speaker": item.get("speaker", "0"),
+            "text": item.get("onebest", ""),
+            "start": int(item.get("bg", 0)),
+            "end": int(item.get("ed", 0)),
+        })
+    return segments
 
 
 def _segments_to_markdown(segments: list[dict]) -> str:
@@ -161,14 +157,15 @@ def _segments_to_markdown(segments: list[dict]) -> str:
     lines = []
     current_speaker = None
     for seg in segments:
-        speaker = seg["speaker"]
+        speaker_id = seg["speaker"]
+        speaker = SPEAKER_NAME if speaker_id == "1" else f"Speaker {speaker_id}"
         timestamp = _format_timestamp(seg["start"])
         text = seg["text"].strip()
         if not text:
             continue
 
-        if speaker != current_speaker:
-            current_speaker = speaker
+        if speaker_id != current_speaker:
+            current_speaker = speaker_id
             lines.append(f"\n**{speaker}** [{timestamp}]:\n{text}")
         else:
             lines.append(text)
@@ -184,7 +181,10 @@ def save_markdown(wav_path: Path, segments: list[dict], md_path: Path = None) ->
     stat = wav_path.stat()
     recorded_dt = datetime.fromtimestamp(stat.st_mtime)
 
-    speakers = sorted(set(seg["speaker"] for seg in segments if seg.get("speaker")))
+    speaker_ids = sorted(set(seg["speaker"] for seg in segments if seg.get("speaker")))
+    speakers = []
+    for sid in speaker_ids:
+        speakers.append(SPEAKER_NAME if sid == "1" else f"Speaker {sid}")
     speaker_info = f"**Speakers:** {', '.join(speakers)}\n" if len(speakers) > 1 else ""
 
     transcript_md = _segments_to_markdown(segments)
