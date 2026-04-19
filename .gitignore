@@ -1,0 +1,20 @@
+# Personal / sensitive
+secrets.json
+voice_sample.wav
+.processed.json
+recorder.log
+
+# Recordings
+recordings/
+
+# Python
+__pycache__/
+*.pyc
+
+# Windows startup script (machine-specific path)
+start_recorder.vbs
+
+# IDE / editor
+.claude/
+.vscode/
+.idea/
