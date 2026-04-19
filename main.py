@@ -17,8 +17,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("recorder")
 from importer import find_new_files, mark_processed
-from transcriber import transcribe_and_save
+from transcriber import transcribe_and_save, _get_wav_duration
 from watcher import watch_for_dji
+
+MIN_DURATION = 10  # seconds — skip files shorter than this
 
 
 def on_drive_connected(drive_path: Path):
@@ -35,9 +37,17 @@ def on_drive_connected(drive_path: Path):
         return
 
     success = 0
+    skipped = 0
     failed = []
 
     for wav_path, file_key in new_files:
+        duration = _get_wav_duration(wav_path)
+        if duration < MIN_DURATION:
+            log.info(f"  Skipping {wav_path.name} ({duration:.0f}s < {MIN_DURATION}s)")
+            mark_processed(file_key, wav_path, None)
+            skipped += 1
+            continue
+
         try:
             today = datetime.now().strftime("%Y-%m-%d")
             out_dir = RECORDINGS_DIR / today
@@ -56,6 +66,7 @@ def on_drive_connected(drive_path: Path):
     log.info(f"  === Report ===")
     log.info(f"  Total:       {len(new_files)} file(s)")
     log.info(f"  Transcribed: {success}")
+    log.info(f"  Skipped:     {skipped} (< {MIN_DURATION}s)")
     log.info(f"  Failed:      {len(failed)}")
     if failed:
         for name in failed:

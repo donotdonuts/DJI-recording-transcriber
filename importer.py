@@ -61,12 +61,16 @@ def find_new_files(drive_path: Path) -> list[tuple[Path, str]]:
     return new_files
 
 
-def mark_processed(file_key: str, wav_path: Path, md_path: Path):
-    """Mark a file as successfully processed in the central record."""
+def mark_processed(file_key: str, wav_path: Path, md_path: Path = None):
+    """Mark a file as processed in the central record."""
     processed = load_processed()
-    processed[file_key] = {
+    entry = {
         "processed_at": datetime.now().isoformat(),
         "source": wav_path.name,
-        "transcript": str(md_path),
     }
+    if md_path:
+        entry["transcript"] = str(md_path)
+    else:
+        entry["skipped"] = True
+    processed[file_key] = entry
     save_processed(processed)
