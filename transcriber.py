@@ -3,6 +3,8 @@ import hmac
 import base64
 import json
 import math
+import subprocess
+import tempfile
 import time
 import wave
 from datetime import datetime
@@ -78,10 +80,38 @@ def _api_request(endpoint: str, app_id: str, secret_key: str, **extra) -> dict:
     return result
 
 
+def _convert_for_xfyun(wav_path: Path) -> Path | None:
+    """Convert audio to 16kHz/16-bit WAV if needed. Returns temp path or None if no conversion needed."""
+    try:
+        with wave.open(str(wav_path), "rb") as wf:
+            rate = wf.getframerate()
+            width = wf.getsampwidth()
+    except Exception:
+        rate, width = 0, 0
+
+    if rate == 16000 and width == 2:
+        return None  # Already in correct format
+
+    print(f"    Converting to 16kHz/16-bit for iFlytek...")
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.close()
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(wav_path), "-ar", "16000", "-ac", "1",
+         "-sample_fmt", "s16", tmp.name],
+        capture_output=True, check=True,
+    )
+    return Path(tmp.name)
+
+
 def transcribe(wav_path: Path) -> list[dict]:
     """Upload a WAV file to iFlytek and get diarized transcription."""
     app_id, secret_key = _get_credentials()
-    file_size = wav_path.stat().st_size
+
+    # Convert if needed (DJI Mic 3 records at 48kHz/24-bit)
+    converted = _convert_for_xfyun(wav_path)
+    upload_path = converted or wav_path
+
+    file_size = upload_path.stat().st_size
     file_name = wav_path.name
     slice_num = math.ceil(file_size / SLICE_SIZE)
 
@@ -98,21 +128,27 @@ def transcribe(wav_path: Path) -> list[dict]:
     task_id = result["data"]
 
     # Step 2: Upload slices
-    with open(wav_path, "rb") as f:
+    # slice_id must be 10 chars: aaaaaaaaaa, aaaaaaaaab, ...
+    with open(upload_path, "rb") as f:
         for i in range(slice_num):
             chunk = f.read(SLICE_SIZE)
+            slice_id = "a" * (10 - len(str(i))) + chr(ord("a") + i % 26)
+            if i < 26:
+                slice_id = "a" * 9 + chr(ord("a") + i)
+            else:
+                slice_id = "a" * 8 + chr(ord("a") + i // 26) + chr(ord("a") + i % 26)
             ts, signa = _sign(app_id, secret_key)
             data = {
                 "app_id": app_id,
                 "signa": signa,
                 "ts": ts,
                 "task_id": task_id,
-                "slice_id": f"aaa_{i}",
+                "slice_id": slice_id,
             }
             resp = requests.post(
                 f"{BASE_URL}/upload",
                 data=data,
-                files={"content": chunk},
+                files={"content": ("audio.wav", chunk, "application/octet-stream")},
             )
             resp.raise_for_status()
 
@@ -136,6 +172,10 @@ def transcribe(wav_path: Path) -> list[dict]:
     raw_data = result["data"]
     if isinstance(raw_data, str):
         raw_data = json.loads(raw_data)
+
+    # Clean up temp file
+    if converted:
+        converted.unlink(missing_ok=True)
 
     # Parse into segments
     segments = []
